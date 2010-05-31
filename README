@@ -1,0 +1,34 @@
+________                    .__            __         .__
+\______ \ ___.__. ____      |  |__   _____/  |_______ |  |  __ __  ____
+ |    |  <   |  |/    \     |  |  \ /  _ \   __\____ \|  | |  |  \/ ___\
+ |    `   \___  |   |  \    |   Y  (  <_> )  | |  |_> >  |_|  |  / /_/  >
+/_______  / ____|___|  /____|___|  /\____/|__| |   __/|____/____/\___  /
+        \/\/         \/_____/    \/            |__|             /_____/
+
+Author:  Quentin Casasnovas
+Licence: GPL2
+Version: 0.1
+
+1. Description
+~~~~~~~~~~~~~~
+
+2. Usage
+~~~~~~~~
+  _
+ / \
+( ! ) -------------------------------------------------------------------------
+ \_/
+-------------------------------------------------------------------------------
+
+3. Documentation
+~~~~~~~~~~~~~~~~
+  The source code is fully documented, you may read the source files directly,
+or generate a doxygen documentation in html using the command:
+  42sh$ make doc
+  You must have the programm doxygen to generate the documentation.
+
+4. Miscellaneous
+~~~~~~~~~~~~~~~~
+  The ascii font used in INSTALL and README files is "graffiti" ans has been
+generated with the online ascii generator present at
+http://www.network-science.de/ascii/
