@@ -45,8 +45,7 @@ struct managed_cpu {
 	unsigned long cpu_load;
 	unsigned long smoothed_load;
 
-	cputime64_t rel_system;
-	cputime64_t rel_user;
+	cputime64_t rel_idling;
 	cputime64_t rel_total;
 
 	int cpu;
@@ -59,7 +58,7 @@ struct rm {
 
 	struct proc_dir_entry *proc_dir;
 	unsigned int nr_cpus_killed;
-	unsigned int qof;
+	unsigned int qos;
 	unsigned int active;
 	unsigned int periodicity;
 	unsigned int smooth_coef;
@@ -71,7 +70,7 @@ struct rm {
 };
 
 #define MAX_LOAD		1000
-#define HIGH_LOAD_LIMIT		(85 * MAX_LOAD / 100)
+#define HIGH_LOAD_LIMIT		(90 * MAX_LOAD / 100)
 
 
 #define PIO_BADDR 0xEFFD0000
@@ -88,10 +87,10 @@ struct rm rm = {
 	.managed_cpus = NULL,
 	.proc_dir = NULL,
 	.nr_cpus_killed = 0,
-	.qof = MAX_LOAD,
+	.qos = MAX_LOAD,
 	.active = 0,
 	.periodicity = 250,
-	.smooth_coef = 4,
+	.smooth_coef = 1,
 	.nr_running = 0,
 	.sum_smoothed_load = MAX_LOAD / 2,
 	.locked = 0
@@ -139,22 +138,19 @@ static unsigned int rm_update_cpus_load(void)
 		managed_cpu = list_entry(pos, struct managed_cpu, online_list);
 		cpustat = &(kstat_cpu(managed_cpu->cpu).cpustat);
 		if (managed_cpu->rel_total) { /* First time we pass here, no delta */
-			managed_cpu->rel_user =
-				cputime64_sub(cpustat->user, managed_cpu->rel_user);
-			managed_cpu->rel_system =
-				cputime64_sub(cpustat->system, managed_cpu->rel_system);
+			managed_cpu->rel_idling =
+				cputime64_sub(cpustat->idle, managed_cpu->rel_idling);
 			managed_cpu->rel_total =
 				cputime64_sub(now, managed_cpu->rel_total);
 
 			managed_cpu->cpu_load =
-				((unsigned long) (managed_cpu->rel_user + managed_cpu->rel_system)) * MAX_LOAD /
+				((unsigned long) (cputime64_sub(managed_cpu->rel_total, managed_cpu->rel_idling))) * MAX_LOAD /
 				((unsigned long) (managed_cpu->rel_total));
 
 			rm_update_smoothed_load(managed_cpu);
 			rm.sum_smoothed_load += managed_cpu->smoothed_load;
 		}
-		managed_cpu->rel_user = cpustat->user;
-		managed_cpu->rel_system = cpustat->system;
+		managed_cpu->rel_idling = cpustat->idle;
 		managed_cpu->rel_total  = now;
 		++nr_cpus;
 	}
@@ -243,15 +239,15 @@ static void rm_birth_cpu(void)
  */
 static int rm_adjust_nr_cpus(unsigned int nr_cpus)
 {
-	unsigned long predicted_qof =
+	unsigned long predicted_qos =
 		(MAX_LOAD * (nr_cpus - 1)) * MAX_LOAD / (rm.sum_smoothed_load + 1);
 
-	if (nr_cpus > 1 && predicted_qof >= rm.qof) {
+	if (nr_cpus > 1 && predicted_qos >= rm.qos) {
 		rm_kill_cpu();
 		return 1;
 	} else if (rm.nr_cpus_killed &&
-		   rm.sum_smoothed_load > HIGH_LOAD_LIMIT &&
-		   rm.nr_running / nr_cpus > MAX_LOAD / (rm.qof + 1)) {
+		   rm.sum_smoothed_load > (HIGH_LOAD_LIMIT * nr_cpus) &&
+		   rm.nr_running / nr_cpus > MAX_LOAD / (rm.qos + 1)) {
 		rm_birth_cpu();
 		return 1;
 	}
@@ -268,16 +264,19 @@ static int rm_adjust_nr_cpus(unsigned int nr_cpus)
 static int cpu_killer_thread(void* data)
 {
 	unsigned int nr_cpus = 0;
+	unsigned int timeout = 0;
 
 	while (!kthread_should_stop()) {
 
  		nr_cpus = rm_update_cpus_load();
  		rm.nr_running = (unsigned int) nr_running();
 
- 		rm_adjust_nr_cpus(nr_cpus);
+		rm_adjust_nr_cpus(nr_cpus);
 
+		timeout = HZ / (1000 / rm.periodicity);
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		if (schedule_timeout(HZ / (1000 / rm.periodicity)) != 0)
+
+		if (schedule_timeout(timeout) != 0)
 			printk(KERN_INFO "RM: early schedule_timeout\n");
 	}
 
@@ -363,13 +362,33 @@ static int active_write_proc(struct file *file, const char __user *buffer,
 	return count;
 }
 
-static int qof_read_proc(char *page, char **start, off_t off,
-			 int count, int *eof, void *data)
+static int smooth_coef_read_proc(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
 {
-	return snprintf(page, count, "%d\n", rm.qof);
+	return snprintf(page, count, "%d\n", rm.smooth_coef);
 }
 
-static int qof_write_proc(struct file *file, const char __user *buffer,
+static int smooth_coef_write_proc(struct file *file, const char __user *buffer,
+				  unsigned long count, void *data)
+{
+	unsigned long value = simple_strtoul(buffer, NULL, 10);
+
+	if (value > 10 || value == 0)
+		return -EINVAL;
+
+	rm.smooth_coef = value;
+
+	return count;
+}
+
+
+static int qos_read_proc(char *page, char **start, off_t off,
+			 int count, int *eof, void *data)
+{
+	return snprintf(page, count, "%d\n", rm.qos * 100 / MAX_LOAD);
+}
+
+static int qos_write_proc(struct file *file, const char __user *buffer,
 					 unsigned long count, void *data)
 {
 	unsigned long value = simple_strtoul(buffer, NULL, 10);
@@ -377,10 +396,30 @@ static int qof_write_proc(struct file *file, const char __user *buffer,
 	if (value > MAX_LOAD)
 		return -EINVAL;
 
-	rm.qof = value;
+	rm.qos = value * MAX_LOAD / 100;
 
 	return count;
 }
+
+static int periodicity_read_proc(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
+{
+	return snprintf(page, count, "%d\n", rm.periodicity);
+}
+
+static int periodicity_write_proc(struct file *file, const char __user *buffer,
+				  unsigned long count, void *data)
+{
+	unsigned long value = simple_strtoul(buffer, NULL, 10);
+
+	if (value > 1000 || value < 150)
+		return -EINVAL;
+
+	rm.periodicity = value;
+
+	return count;
+}
+
 
 static int nr_cpus_killed_read_proc(char *page, char **start, off_t off,
 				    int count, int *eof, void *data)
@@ -405,11 +444,11 @@ static int rm_init_proc(void)
 	tmp_entry->read_proc = active_read_proc;
 	tmp_entry->write_proc = active_write_proc;
 
-	if (!(tmp_entry = create_proc_entry("qof", 0600, rm.proc_dir)))
-		goto error_qof;
+	if (!(tmp_entry = create_proc_entry("qos", 0600, rm.proc_dir)))
+		goto error_qos;
 	tmp_entry->data = NULL;
-	tmp_entry->read_proc = qof_read_proc;
-	tmp_entry->write_proc = qof_write_proc;
+	tmp_entry->read_proc = qos_read_proc;
+	tmp_entry->write_proc = qos_write_proc;
 
 	if (!(tmp_entry = create_proc_entry("nr_cpus_killed", 0400, rm.proc_dir)))
 		goto error_nr;
@@ -429,16 +468,32 @@ static int rm_init_proc(void)
 	tmp_entry->read_proc = led1_read_proc;
 	tmp_entry->write_proc = led1_write_proc;
 
+	if (!(tmp_entry = create_proc_entry("smooth_coef", 0600, rm.proc_dir)))
+		goto error_smooth_coef;
+	tmp_entry->data = NULL;
+	tmp_entry->read_proc = smooth_coef_read_proc;
+	tmp_entry->write_proc = smooth_coef_write_proc;
+
+	if (!(tmp_entry = create_proc_entry("periodicity", 0600, rm.proc_dir)))
+		goto error_periodicity;
+	tmp_entry->data = NULL;
+	tmp_entry->read_proc = periodicity_read_proc;
+	tmp_entry->write_proc = periodicity_write_proc;
+
 	return 0;
 
+ error_periodicity:
+	remove_proc_entry("smooth_coef", rm.proc_dir);
+ error_smooth_coef:
+	remove_proc_entry("led1", rm.proc_dir);
  error_led1:
 	remove_proc_entry("led0", rm.proc_dir);
  error_led0:
 	remove_proc_entry("nr_cpus_killed", rm.proc_dir);
  error_nr:
 	remove_proc_entry("active", rm.proc_dir);
- error_qof:
-	remove_proc_entry("qof", rm.proc_dir);
+ error_qos:
+	remove_proc_entry("qos", rm.proc_dir);
  error:
 	if (rm.proc_dir)
 		remove_proc_entry("rm", rm.proc_dir->parent);
@@ -450,11 +505,13 @@ static int rm_init_proc(void)
  */
 static void rm_exit_proc(void)
 {
-	remove_proc_entry("qof", rm.proc_dir);
+	remove_proc_entry("qos", rm.proc_dir);
 	remove_proc_entry("active", rm.proc_dir);
 	remove_proc_entry("nr_cpus_killed", rm.proc_dir);
 	remove_proc_entry("led0", rm.proc_dir);
 	remove_proc_entry("led1", rm.proc_dir);
+	remove_proc_entry("smooth_coef", rm.proc_dir);
+	remove_proc_entry("periodicity", rm.proc_dir);
 	remove_proc_entry("rm", rm.proc_dir->parent);
 }
 
